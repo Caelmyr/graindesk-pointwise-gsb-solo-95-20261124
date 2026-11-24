@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GrainDesk · 骨料图像筛级</title>
+<link rel="stylesheet" href="/static/grain.css">
+<script src="/static/grain.js" defer></script>
+</head>
+<body>
+<header>
+  <a class="wordmark" href="/">Grain<span>Desk</span></a>
+  <nav><a href="/prepare">照片准备 ↗</a></nav>
+</header>
+<main>
+  <section class="title">
+    <div><h1>骨料图像筛级</h1><p>背照连通颗粒、等面积圆径与分档留样</p></div>
+    <div class="actions"><button id="demo" class="primary">打开合成练习</button><button id="import">导入原片</button></div>
+    <input id="file" type="file" accept="image/png,image/jpeg,image/tiff" hidden>
+  </section>
+  <section class="library">
+    <label>原片<select id="plates"><option value="">选择原片</option></select></label>
+    <label>检查记录<select id="reports" disabled><option value="">当前检查</option></select></label>
+    <p id="status" role="status">打开练习或导入一张背照铺粒照片。</p>
+  </section>
+  <div id="workbench" class="workspace" hidden>
+    <section class="inspection">
+      <div class="panel-head">
+        <div class="tabs" aria-label="预览模式">
+          <button data-mode="photo" aria-pressed="false">原片</button>
+          <button data-mode="binary" aria-pressed="false">二值图</button>
+          <button data-mode="grade" aria-pressed="true">分档图</button>
+        </div>
+        <span id="resolution"></span>
+      </div>
+      <figure id="stage" class="stage-wrap">
+        <div id="raster"><img id="preview" alt="骨料原片预览"><canvas id="overlay" aria-label="原片选点区域"></canvas></div>
+      </figure>
+      <div class="panel-foot">
+        <div class="actions">
+          <button id="pick">点选颗粒</button><button id="box">画检查框</button><button id="full">整张原片</button>
+        </div>
+        <span id="cursor"></span>
+      </div>
+    </section>
+    <aside class="sidebar">
+      <section class="card">
+        <h2>检查参数</h2>
+        <div class="two">
+          <label>灰度阈值<input id="threshold" type="number" min="0" max="255" step="1"></label>
+          <label>最小颗粒像素<input id="minimum" type="number" min="1" step="1"></label>
+        </div>
+        <div class="two scale">
+          <label>标尺长度 (mm)<input id="length" type="number" min=".001" max="10000" step="any" placeholder="先填长度"></label>
+          <button id="calibrate">点标尺两端</button>
+        </div>
+        <div id="calibration" class="hint"></div>
+        <label>孔径档位 (mm)<input id="holes" type="text" placeholder="2, 4, 6, 8, 10"></label>
+        <div class="actions spaced"><button id="apply">重算</button><button id="settings">保存设置</button></div>
+      </section>
+      <section class="card selected">
+        <h2>颗粒复核</h2>
+        <p id="probe" class="hint">点图或列表可定位颗粒。</p>
+        <button id="exclude" disabled>排除该粒</button>
+      </section>
+    </aside>
+    <section class="card grades">
+      <div class="grade-head"><h2>筛级汇总</h2><span id="counts"></span></div>
+      <div id="summary" class="summary"></div>
+      <div class="export actions">
+        <button id="saveReport" class="primary">保存留样</button>
+        <a id="raw" download>下载原片 PNG</a>
+        <a id="imageReport" download hidden>下载分档 PNG</a>
+        <a id="csvReport" download hidden>下载颗粒 CSV</a>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr><th>粒号</th><th>像素面积</th><th>等效直径</th><th>孔级 / 状态</th></tr></thead><tbody id="rows"></tbody></table>
+      </div>
+    </section>
+  </div>
+  <dialog id="reportDialog">
+    <form id="reportForm"><h2>保存留样</h2><label>留样名称<input id="reportTitle" required maxlength="100"></label>
+      <div class="actions"><button type="button" id="cancelReport">取消</button><button class="primary">保存</button></div>
+    </form>
+  </dialog>
+</main>
+</body>
+</html>
