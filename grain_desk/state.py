@@ -45,7 +45,10 @@ def point(raw, width, height):
 def settings(record, updates):
     if not isinstance(updates, dict):
         raise Invalid("请发送有效的检查参数。")
+    # a stored record without a convention predates whole-grain readings: keep it legacy
     data = {**record["settings"], **updates}
+    if "crossing" not in record["settings"] and "crossing" not in updates:
+        data["crossing"] = "legacy"
     width, height = record["width"], record["height"]
     box = data["box"]
     if not isinstance(box, list) or len(box) != 4:
@@ -54,6 +57,9 @@ def settings(record, updates):
     top = whole(box[1], 0, height - 1, "上边")
     right = whole(box[2], left + 1, width, "右边")
     bottom = whole(box[3], top + 1, height, "下边")
+    crossing = data.get("crossing", images.DEFAULT_CROSSING)
+    if crossing not in images.CROSSING:
+        raise Invalid("请选择有效的跨框颗粒口径。")
     calibration = data["calibration"]
     if calibration is not None:
         if not isinstance(calibration, dict) or not isinstance(calibration.get("points"), list) or len(calibration["points"]) != 2:
@@ -73,7 +79,8 @@ def settings(record, updates):
         raise Invalid("排除列表超过检查上限。")
     if any(not isinstance(value, str) or GRAIN.fullmatch(value) is None for value in excluded):
         raise Invalid("排除列表的颗粒编号无效。")
-    return {"box": [left, top, right, bottom], "calibration": calibration, "holes": holes,
+    return {"box": [left, top, right, bottom], "crossing": crossing,
+            "calibration": calibration, "holes": holes,
             "threshold": whole(data["threshold"], 0, 255, "灰度阈值"),
             "min_area": whole(data["min_area"], 1, images.MAX_PIXELS, "最小像素面积"),
             "excluded": list(dict.fromkeys(excluded))}
@@ -126,6 +133,7 @@ class Library:
         plate = uuid4().hex[:16]
         width, height = image.size
         options = {"box": [0, 0, width, height], "threshold": 110, "min_area": 36,
+                   "crossing": images.DEFAULT_CROSSING,
                    "calibration": None, "holes": [2, 4, 6, 8, 10], "excluded": []}
         if synthetic:
             options["box"] = [28, 65, 730, 393]

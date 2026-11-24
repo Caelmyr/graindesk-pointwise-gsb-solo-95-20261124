@@ -130,18 +130,47 @@ def create_app(root):
     @desk.get("/plates/<plate>/reports/<report>/grains.csv")
     def grains_csv(plate, report):
         record = library.report(plate, report)
+        crossing = record["results"].get("crossing", "legacy")
         output = StringIO(newline="")
         writer = csv.writer(output)
-        writer.writerow(["grain_id", "x_px", "y_px", "area_px", "equivalent_mm", "class_upper_mm", "status"])
-        for row in record["results"]["grains"]:
-            index = row["grade"]
-            hole = record["results"]["grades"][index]["hole"] if index is not None else None
-            status = "edge" if row["edge"] else "excluded" if row["excluded"] else "unscaled" if index is None else "counted"
-            if index is not None and hole is None:
-                hole = "oversize"
-            size = row["equivalent_mm"]
-            writer.writerow([row["id"], *row["center"], row["area_px"], f"{size:.6f}" if size is not None else "",
-                             hole if hole is not None else "", status])
+        if crossing == "legacy":
+            writer.writerow(["grain_id", "x_px", "y_px", "area_px", "equivalent_mm",
+                             "class_upper_mm", "status"])
+            for row in record["results"]["grains"]:
+                index = row["grade"]
+                hole = record["results"]["grades"][index]["hole"] if index is not None else None
+                status = "edge" if row["edge"] else "excluded" if row["excluded"] else \
+                    "unscaled" if index is None else "counted"
+                if index is not None and hole is None:
+                    hole = "oversize"
+                size = row["equivalent_mm"]
+                writer.writerow([row["id"], *row["center"], row["area_px"],
+                                 f"{size:.6f}" if size is not None else "",
+                                 hole if hole is not None else "", status])
+        else:
+            writer.writerow(["grain_id", "x_px", "y_px", "area_px", "in_box_px", "box_share",
+                             "equivalent_mm", "class_upper_mm", "status"])
+            for row in record["results"]["grains"]:
+                index = row["grade"]
+                hole = record["results"]["grades"][index]["hole"] if index is not None else None
+                if row["truncated"]:
+                    status = "truncated"
+                elif row["excluded"]:
+                    status = "excluded"
+                elif index is None:
+                    status = "unscaled"
+                elif row["share"] == 0:
+                    status = "adjacent"
+                else:
+                    status = "partial" if row["share"] < 1 else "counted"
+                if index is not None and hole is None:
+                    hole = "oversize"
+                size = row["equivalent_mm"]
+                share = row["share"]
+                writer.writerow([row["id"], *row["center"], row["area_px"], row["in_box_px"],
+                                 f"{share:.9f}" if share < 1 else "1",
+                                 f"{size:.6f}" if size is not None else "",
+                                 hole if hole is not None else "", status])
         return send_file(BytesIO(output.getvalue().encode("utf-8-sig")), mimetype="text/csv",
                          download_name="grain-grades.csv", as_attachment=True, max_age=0)
 

@@ -55,6 +55,11 @@
           <button id="calibrate">点标尺两端</button>
         </div>
         <div id="calibration" class="hint"></div>
+        <label>跨框颗粒口径<select id="crossing">
+          <option value="centroid">按质心归属整粒</option>
+          <option value="coverage">按框内像素份额</option>
+        </select></label>
+        <p id="crossingHint" class="hint"></p>
         <label>孔径档位 (mm)<input id="holes" type="text" placeholder="2, 4, 6, 8, 10"></label>
         <div class="actions spaced"><button id="apply">重算</button><button id="settings">保存设置</button></div>
       </section>
@@ -74,7 +79,7 @@
         <a id="csvReport" download hidden>下载颗粒 CSV</a>
       </div>
       <div class="table-wrap">
-        <table><thead><tr><th>粒号</th><th>像素面积</th><th>等效直径</th><th>孔级 / 状态</th></tr></thead><tbody id="rows"></tbody></table>
+        <table><thead><tr><th>粒号</th><th>像素面积</th><th>等效直径</th><th>本框份额</th><th>孔级 / 状态</th></tr></thead><tbody id="rows"></tbody></table>
       </div>
     </section>
   </div>

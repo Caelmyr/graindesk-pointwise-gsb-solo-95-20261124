@@ -1,6 +1,7 @@
 """Read prepared plates and measure connected foreground in original pixels."""
 
 from dataclasses import dataclass
+from fractions import Fraction
 from io import BytesIO
 from math import hypot, pi
 
@@ -16,6 +17,10 @@ MAX_GRAINS = 600
 COLORS = [(60, 223, 187), (106, 174, 253), (255, 207, 114), (239, 149, 201),
           (185, 208, 111), (226, 158, 110), (164, 161, 250), (130, 219, 237), (233, 221, 181)]
 VIEWS = {"photo", "binary", "grade"}
+# legacy keeps the old box-cropped reading; centroid and coverage measure whole
+# grains against the original plate and only change how the box is credited.
+CROSSING = ("legacy", "centroid", "coverage")
+DEFAULT_CROSSING = "centroid"
 
 
 def decode(data):
@@ -93,6 +98,7 @@ class Analysis:
     grades: list
     foreground: int
     mm_per_px: float | None
+    crossing: str = "legacy"
 
     def grain_at(self, point):
         x, y = point
@@ -100,15 +106,23 @@ class Analysis:
         if not (left <= x < right and top <= y < bottom):
             return None
         label = int(self.labels[y - top, x - left])
+        if label == 0:
+            return None
         match = next((row for row in self.grains if row["label"] == label), None)
         return match["id"] if match else None
 
     def report(self):
         visible = [{k: value for k, value in row.items() if k != "label"} for row in self.grains]
-        counted = [row for row in visible if row["grade"] is not None]
-        return {"box": self.box, "mm_per_px": self.mm_per_px, "foreground_px": self.foreground,
-                "total": len(visible), "counted": len(counted), "grains": visible, "grades": self.grades}
-
+        credited = [row for row in visible if row["grade"] is not None and row.get("share", 1) > 0]
+        if self.crossing == "coverage":
+            counted = float(sum(Fraction(row["in_box_px"], row["area_px"]) for row in credited))
+        else:
+            counted = len(credited)
+        truncated = sum(1 for row in visible if row.get("truncated"))
+        return {"box": self.box, "crossing": self.crossing, "mm_per_px": self.mm_per_px,
+                "foreground_px": self.foreground, "total": len(visible), "truncated": truncated,
+                "counted": counted, "counted_grains": len(credited),
+                "grains": visible, "grades": self.grades}
 
 def scale(calibration):
     if calibration is None:
@@ -128,6 +142,7 @@ def size_grade(size, holes):
 
 
 def component_rows(labels, stats, centroids, box, options, factor):
+    """Legacy reading: components are found inside the box crop, so box edges truncate."""
     left, top, right, bottom = box
     width = right - left
     positions = np.flatnonzero(labels.ravel())
@@ -150,31 +165,131 @@ def component_rows(labels, stats, centroids, box, options, factor):
                      "center": [round(float(centroids[label][0]) + left, 2),
                                 round(float(centroids[label][1]) + top, 2)],
                      "bounds": [x + left, y + top, x + w + left, y + h + top],
-                     "edge": edge, "excluded": omitted, "equivalent_mm": size, "grade": grade})
+                     "edge": edge, "excluded": omitted, "equivalent_mm": size, "grade": grade,
+                     "share": 1.0})
     return sorted(rows, key=lambda row: (-row["area_px"], row["center"][1], row["center"][0]))
 
 
-def group_grades(rows, holes):
-    grades = [{"id": n, "hole": opening, "count": 0, "area_px": 0,
+def plate_components(image, options):
+    """Label foreground once on the whole plate; only the plate border truncates a grain."""
+    pixels = np.asarray(image.convert("L"))
+    foreground = np.ascontiguousarray(pixels <= options["threshold"], dtype=np.uint8)
+    _, labels, stats, centroids = cv2.connectedComponentsWithStats(foreground, connectivity=8)
+    border = {int(label) for label in np.concatenate(
+        (labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1])) if label}
+    return labels, stats, centroids, border
+
+
+def first_pixel(labels, stats, label):
+    """Topmost, then leftmost, pixel of a component: a stable original-plate grain number."""
+    x, y, width = (int(stats[label, cv2.CC_STAT_LEFT]), int(stats[label, cv2.CC_STAT_TOP]),
+                   int(stats[label, cv2.CC_STAT_WIDTH]))
+    row = labels[y, x:x + width] == label
+    return x + int(np.flatnonzero(row)[0]), y
+
+
+def crossing_rows(labels, stats, centroids, border, box, options, factor, mode):
+    """Measure whole original grains and decide how much this box credits each one."""
+    left, top, right, bottom = box
+    minimum = options["min_area"]
+    excluded = set(options["excluded"])
+    rows = []
+    for label, item in component_catalog(labels, stats, centroids, border, box, minimum).items():
+        x0, y0, x1, y1 = item["bounds"]
+        ix0, iy0 = max(left, x0), max(top, y0)
+        ix1, iy1 = min(right, x1), min(bottom, y1)
+        inside = int(np.count_nonzero(labels[iy0:iy1, ix0:ix1] == label)) if ix0 < ix1 and iy0 < iy1 else 0
+        if inside == 0:
+            continue
+        identifier = item["id"]
+        truncated = item["truncated"]
+        omitted = identifier in excluded
+        centre_x, centre_y = item["center"]
+        if truncated:
+            size, grade, share = None, None, 0.0
+        else:
+            size = equivalent_size(item["area_px"], factor)
+            grade = None if omitted else size_grade(size, options["holes"])
+            if omitted:
+                share = 0.0
+            elif mode == "centroid":
+                share = 1.0 if left <= centre_x < right and top <= centre_y < bottom else 0.0
+            else:
+                share = inside / item["area_px"]
+        rows.append({"id": identifier, "label": label, "area_px": item["area_px"],
+                     "in_box_px": inside, "share": share,
+                     "center": [round(centre_x, 2), round(centre_y, 2)],
+                     "bounds": item["bounds"], "truncated": truncated,
+                     "edge": truncated, "excluded": omitted,
+                     "equivalent_mm": size, "grade": grade})
+    return sorted(rows, key=lambda row: (-row["area_px"], row["id"]))
+
+
+def component_catalog(labels, stats, centroids, border, box, minimum):
+    """Index the plate components that can matter to this box: stable id, bounds, area, centre."""
+    left, top, right, bottom = box
+    catalog = {}
+    relevant = np.unique(labels[top:bottom, left:right])
+    for raw in relevant:
+        label = int(raw)
+        if label == 0 or int(stats[label, cv2.CC_STAT_AREA]) < minimum:
+            continue
+        x, y, w, h = (int(stats[label, cv2.CC_STAT_LEFT]), int(stats[label, cv2.CC_STAT_TOP]),
+                      int(stats[label, cv2.CC_STAT_WIDTH]), int(stats[label, cv2.CC_STAT_HEIGHT]))
+        gx, gy = first_pixel(labels, stats, label)
+        catalog[label] = {"id": f"{gx}:{gy}", "bounds": [x, y, x + w, y + h],
+                          "area_px": int(stats[label, cv2.CC_STAT_AREA]),
+                          "center": [float(centroids[label][0]), float(centroids[label][1])],
+                          "truncated": label in border}
+    return catalog
+
+
+def group_grades(rows, holes, mode="legacy"):
+    """Credit each grade under the active convention; coverage keeps exact fractional counts."""
+    fractional = mode == "coverage"
+    grades = [{"id": n, "hole": opening, "count": Fraction(0), "area_px": 0,
                "color": "#%02x%02x%02x" % COLORS[n]} for n, opening in enumerate([*holes, None])]
     for row in rows:
-        if row["grade"] is not None:
-            target = grades[row["grade"]]
-            target["count"] += 1
-            target["area_px"] += row["area_px"]
+        if row["grade"] is None:
+            continue
+        target = grades[row["grade"]]
+        if mode == "legacy":
+            credit, area = 1, row["area_px"]
+        elif mode == "coverage":
+            credit, area = Fraction(row["in_box_px"], row["area_px"]), row["in_box_px"]
+        else:
+            credit, area = (1, row["area_px"]) if row["share"] > 0 else (0, 0)
+        target["count"] += credit
+        target["area_px"] += area
+    for grade in grades:
+        grade["count"] = float(grade["count"]) if fractional else int(grade["count"])
+        grade["area_px"] = float(grade["area_px"]) if fractional else int(grade["area_px"])
     return grades
 
 
 def analyze(image, options):
     box = options["box"]
-    pixels = np.asarray(image.crop(tuple(box)).convert("L"))
-    foreground = np.ascontiguousarray(pixels <= options["threshold"], dtype=np.uint8)
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(foreground, connectivity=8)
-    if np.count_nonzero(stats[1:, cv2.CC_STAT_AREA] >= options["min_area"]) > MAX_GRAINS:
-        raise Invalid("检查框中的颗粒过多，请缩小框或提高最小面积。")
+    crossing = options.get("crossing", "legacy")
+    if crossing not in CROSSING:
+        raise Invalid("请选择有效的跨框颗粒口径。")
     factor = scale(options["calibration"])
-    rows = component_rows(labels, stats, centroids, box, options, factor)
-    return Analysis(box, labels, rows, group_grades(rows, options["holes"]), int(foreground.sum()), factor)
+    if crossing == "legacy":
+        pixels = np.asarray(image.crop(tuple(box)).convert("L"))
+        foreground = np.ascontiguousarray(pixels <= options["threshold"], dtype=np.uint8)
+        _, labels, stats, centroids = cv2.connectedComponentsWithStats(foreground, connectivity=8)
+        if np.count_nonzero(stats[1:, cv2.CC_STAT_AREA] >= options["min_area"]) > MAX_GRAINS:
+            raise Invalid("检查框中的颗粒过多，请缩小框或提高最小面积。")
+        rows = component_rows(labels, stats, centroids, box, options, factor)
+        return Analysis(box, labels, rows, group_grades(rows, options["holes"]),
+                        int(foreground.sum()), factor, "legacy")
+    labels, stats, centroids, border = plate_components(image, options)
+    left, top, right, bottom = box
+    rows = crossing_rows(labels, stats, centroids, border, box, options, factor, crossing)
+    if len(rows) > MAX_GRAINS:
+        raise Invalid("检查框中的颗粒过多，请缩小框或提高最小面积。")
+    window = labels[top:bottom, left:right]
+    return Analysis(box, window, rows, group_grades(rows, options["holes"], crossing),
+                    int(np.count_nonzero(window)), factor, crossing)
 
 
 def render(image, result, mode):
@@ -187,13 +302,18 @@ def render(image, result, mode):
         window[:] = np.where(result.labels[..., None] != 0, 35, 230)
     else:
         window[:] = (window.astype(np.uint16) * 2 // 5 + 22).astype(np.uint8)
-        colors = np.zeros((int(result.labels.max()) + 1, 3), dtype=np.uint8)
+        labels = result.labels
+        palette = np.zeros((int(labels.max()) + 1, 3), dtype=np.uint8)
+        tinted = np.zeros(int(labels.max()) + 1, dtype=bool)
         for row in result.grains:
-            color = COLORS[row["grade"]] if row["grade"] is not None else (132, 139, 149)
             if row["edge"]:
                 color = (247, 112, 89)
-            colors[row["label"]] = color
-        mapped = colors[result.labels]
-        present = mapped.any(axis=2)
-        window[present] = mapped[present]
+            elif row["grade"] is not None and row.get("share", 1) > 0:
+                color = COLORS[row["grade"]]
+            else:
+                color = (132, 139, 149)
+            palette[row["label"]] = color
+            tinted[row["label"]] = True
+        present = tinted[labels]
+        window[present] = palette[labels[present]]
     return Image.fromarray(output)

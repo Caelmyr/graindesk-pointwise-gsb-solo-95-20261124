@@ -2,7 +2,7 @@
 
 const el = id => document.getElementById(id);
 const modes = [...document.querySelectorAll("[data-mode]")];
-const editControls = ["threshold", "minimum", "length", "holes", "apply", "settings", "box", "full", "calibrate", "saveReport"];
+const editControls = ["threshold", "minimum", "length", "holes", "crossing", "apply", "settings", "box", "full", "calibrate", "saveReport"];
 const state = {plate: null, settings: null, result: null, report: null, mode: "grade", tool: "pick",
                start: null, selected: null, url: null};
 let busy = false;
@@ -78,10 +78,25 @@ async function loadReports() {
 
 function loadControls() {
   const options = state.settings;
+  const crossing = options.crossing ?? "legacy";
+  const target = el("crossing");
+  const stored = target.querySelector('option[value="legacy"]');
+  if (crossing === "legacy" && !stored) {
+    target.append(option("legacy", "旧读数 · 框内截断（未选口径）"));
+  } else if (crossing !== "legacy" && stored) {
+    stored.remove();
+  }
   el("threshold").value = options.threshold;
   el("minimum").value = options.min_area;
   el("holes").value = options.holes.join(", ");
   el("length").value = options.calibration?.mm ?? "";
+  el("crossing").value = crossing;
+  el("crossingHint").textContent = crossing === "legacy" ?
+    (state.report ? "此留样沿用旧的框内读数，跨框粒仍按截断处理。" :
+      "这张原片还没选整粒口径，沿用原来的框内读数；可改选整粒口径后重算。") :
+    crossing === "coverage" ?
+      "整粒直径按原片量取，按框内像素占整粒的份额计入汇总与分档。" :
+      "整粒直径按原片量取，质心落在本框才由本框计一整粒。";
   el("resolution").textContent = state.plate.width + " × " + state.plate.height + " px";
   el("raw").href = "/grain" + platePath("/source.png?download");
   el("imageReport").hidden = !state.report;
@@ -91,6 +106,7 @@ function loadControls() {
     el("csvReport").href = "/grain" + reportPath("/grains.csv");
   }
   for (const id of editControls) el(id).disabled = Boolean(state.report);
+  el("crossing").title = state.report ? "留样按保存时的口径只读。" : "";
 }
 
 function fieldNumber(id) {
@@ -105,8 +121,12 @@ function readControls() {
   const min_area = fieldNumber("minimum");
   const holes = el("holes").value.split(/[,，]/).map(value => value.trim() ? Number(value) : NaN);
   if (holes.some(value => !Number.isFinite(value) || value <= 0)) throw Error("请用逗号分隔有效孔径。");
-  return {...options, threshold, min_area, holes,
-          excluded: threshold !== options.threshold || min_area !== options.min_area ? [] : options.excluded};
+  const crossing = el("crossing").value || options.crossing || "centroid";
+  // whole-grain conventions share original grain ids, so exclusions survive a switch
+  const whole = ["centroid", "coverage"];
+  const keep = threshold === options.threshold && min_area === options.min_area &&
+    (crossing === options.crossing || whole.includes(crossing) && whole.includes(options.crossing));
+  return {...options, crossing, threshold, min_area, holes, excluded: keep ? options.excluded : []};
 }
 
 function currentRow() {
@@ -114,36 +134,53 @@ function currentRow() {
 }
 
 function gradeLabel(row) {
-  if (row.edge) return "框缘截断";
+  if (row.truncated ?? row.edge) return state.result.crossing === "legacy" ? "框缘截断" : "原片截断";
   if (row.excluded) return "已排除";
+  if (row.share === 0) return "归相邻框";
   if (row.grade === null) return "待标定";
   const opening = state.result.grades[row.grade].hole;
-  return opening === null ? "超最大档" : "≤ " + opening + " mm";
+  const grade = opening === null ? "超最大档" : "≤ " + opening + " mm";
+  return state.result.crossing === "coverage" && row.share < 1 ?
+    grade + " · 计 " + roundShare(row.share) : grade;
+}
+
+function roundShare(value) {
+  return (Math.round(value * 1e6) / 1e6).toLocaleString("zh-CN", {maximumFractionDigits: 6});
 }
 
 function sizeLabel(value) {
   return value === null ? "—" : value.toFixed(2) + " mm";
 }
 
+function shareLabel(row) {
+  if (row.truncated ?? row.edge) return "—";
+  if (row.share === undefined) return "1";
+  return roundShare(row.share);
+}
+
 function renderData() {
   const result = state.result;
   const row = currentRow();
-  el("counts").textContent = "计入 " + result.counted + " / " + result.total + " 粒";
+  el("counts").textContent = result.crossing === "coverage" ?
+    "计入 " + roundShare(result.counted) + " 粒当量 / " + result.total + " 粒" :
+    "计入 " + result.counted + " / " + result.total + " 粒";
   el("calibration").textContent = result.mm_per_px === null ?
     "未标定。仍可检查像素面积与轮廓。" : result.mm_per_px.toPrecision(4) + " mm / px";
+  const grade = row ? gradeLabel(row) : "";
   el("probe").textContent = row ? "粒 " + row.id + " · " + row.area_px + " px² · " + sizeLabel(row.equivalent_mm) +
-    " · " + gradeLabel(row) : "点图或列表可定位颗粒。";
+    " · " + grade : "点图或列表可定位颗粒。";
   el("exclude").textContent = row?.excluded ? "恢复计入" : "排除该粒";
-  el("exclude").disabled = !row || row.edge || Boolean(state.report);
-  const summary = result.grades.map(grade => {
+  el("exclude").disabled = !row || Boolean(row.truncated ?? row.edge) || Boolean(state.report);
+  const summary = result.grades.map(gradeRow => {
     const chip = document.createElement("div");
     chip.className = "grade-chip";
     const swatch = document.createElement("i");
     swatch.className = "swatch";
-    swatch.style.background = grade.color;
+    swatch.style.background = gradeRow.color;
     const count = document.createElement("b");
-    count.textContent = grade.count + " 粒";
-    chip.append(swatch, grade.hole === null ? "超最大档" : "≤ " + grade.hole + " mm", count);
+    count.textContent = result.crossing === "coverage" ?
+      roundShare(gradeRow.count) + " 粒当量" : gradeRow.count + " 粒";
+    chip.append(swatch, gradeRow.hole === null ? "超最大档" : "≤ " + gradeRow.hole + " mm", count);
     return chip;
   });
   el("summary").replaceChildren(...summary);
@@ -153,7 +190,7 @@ function renderData() {
     label.textContent = grain.id;
     label.onclick = () => selectGrain(grain.id);
     tr.insertCell().append(label);
-    for (const value of [grain.area_px, sizeLabel(grain.equivalent_mm), gradeLabel(grain)]) {
+    for (const value of [grain.area_px, sizeLabel(grain.equivalent_mm), shareLabel(grain), gradeLabel(grain)]) {
       tr.insertCell().textContent = value;
     }
     tr.classList.toggle("active-row", grain.id === state.selected);
@@ -210,10 +247,11 @@ async function redraw() {
 
 async function recalc(options) {
   const result = await api(platePath("/inspect"), "POST", {settings: options});
-  state.settings = options;
   state.result = result;
+  state.settings = {...options, crossing: result.crossing};
   if (!currentRow()) state.selected = null;
   await redraw();
+  loadControls();
   renderData();
 }
 
@@ -228,7 +266,6 @@ async function openPlate(id) {
   el("plates").value = id;
   el("workbench").hidden = false;
   el("reports").disabled = false;
-  loadControls();
   await Promise.all([loadReports(), recalc(state.settings)]);
   status(state.plate.synthetic ? "已打开合成练习。" : "已打开原片。");
 }
@@ -241,6 +278,7 @@ async function openReport(id) {
   state.report = await api(platePath("/reports/" + id));
   state.settings = state.report.settings;
   state.result = state.report.results;
+  state.settings = {...state.settings, crossing: state.result.crossing ?? state.settings.crossing ?? "legacy"};
   state.selected = null;
   state.mode = "grade";
   setTool("pick");
