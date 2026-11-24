@@ -63,6 +63,24 @@
         <p id="probe" class="hint">点图或列表可定位颗粒。</p>
         <button id="exclude" disabled>排除该粒</button>
       </section>
+      <section class="card trial">
+        <h2>方筛孔试摆</h2>
+        <p id="trialHint" class="hint">在分档图里点一粒已标定、边缘完整且仍计入的颗粒，再试摆。</p>
+        <div class="actions spaced"><button id="runTrial" disabled>按当前孔径试摆</button></div>
+        <div id="trialResult" hidden>
+          <div id="trialStages" class="trial-stages"></div>
+          <p id="trialReadout" class="hint"></p>
+          <div class="table-wrap tiny-table">
+            <table><thead><tr><th>孔级</th><th>孔径</th><th>摆法</th><th>净余量</th></tr></thead>
+              <tbody id="trialRows"></tbody></table>
+          </div>
+          <div class="actions spaced"><button id="adoptTrial" class="primary" disabled>采用该孔级</button></div>
+        </div>
+        <p id="appliedTrial" class="hint"></p>
+        <div id="appliedActions" class="actions spaced" hidden>
+          <button id="clearTrial">恢复等面积圆径</button>
+        </div>
+      </section>
     </aside>
     <section class="card grades">
       <div class="grade-head"><h2>筛级汇总</h2><span id="counts"></span></div>
@@ -74,7 +92,7 @@
         <a id="csvReport" download hidden>下载颗粒 CSV</a>
       </div>
       <div class="table-wrap">
-        <table><thead><tr><th>粒号</th><th>像素面积</th><th>等效直径</th><th>孔级 / 状态</th></tr></thead><tbody id="rows"></tbody></table>
+        <table><thead><tr><th>粒号</th><th>像素面积</th><th>等效直径</th><th>孔级 / 状态</th><th>方筛摆法</th></tr></thead><tbody id="rows"></tbody></table>
       </div>
     </section>
   </div>

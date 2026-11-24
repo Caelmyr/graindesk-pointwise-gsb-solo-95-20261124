@@ -23,6 +23,17 @@ input,select{width:100%;padding:6px 9px}label{display:flex;flex-direction:column
 #raster{position:relative;line-height:0;max-width:100%;text-align:center;overflow:hidden}#preview{display:block;max-width:100%;max-height:58vh;object-fit:contain}
 #overlay{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
 .sidebar{display:grid;gap:14px}.card{padding:14px}.card h2{margin-bottom:12px}.grade-head h2{margin-bottom:0}
+.trial-stages{display:grid;gap:8px;margin:4px 0 10px}
+.trial-stage-wrap{display:grid;place-items:center;background:#0e1416;border:1px solid var(--border);border-radius:7px;padding:8px}
+.trial-stage-wrap.active{border-color:#527f73}
+.trial-stage-wrap small{color:var(--muted);font-size:11px}
+.trial-stage-wrap canvas{display:block;max-width:100%}
+.tiny-table{max-height:190px}
+.tiny-table th,.tiny-table td{padding:6px 8px}
+.tiny-table td:last-child{white-space:normal}
+.tiny-table td button{min-height:24px;padding:1px 6px;font-size:12px}
+#trialReadout{margin-bottom:8px}
+#appliedTrial{margin-top:10px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:9px}.scale{margin:12px 0 4px;align-items:end}
 #calibration{margin-bottom:12px}.spaced{margin-top:12px;flex-wrap:wrap}.selected button{margin-top:12px}
 .grades{grid-column:1/-1}.summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.grade-chip{border:1px solid var(--border);border-radius:6px;padding:5px 10px;display:flex;gap:8px;align-items:center;color:var(--muted)}
@@ -32,4 +43,5 @@ table{border-collapse:collapse;width:100%;text-align:left}th,td{padding:6px 10px
 td button{min-height:26px;padding:2px 7px}.active-row{background:#233632}
 dialog{color:var(--text);background:var(--surface);border:1px solid var(--border);padding:20px;border-radius:9px;width:min(360px,90vw)}
 dialog::backdrop{background:#0b1012b5}dialog input{margin:8px 0 12px}
-@media(max-width:760px){main{padding-inline:12px}.workspace{grid-template-columns:minmax(0,1fr)}.library{grid-template-columns:1fr 1fr}.library p{grid-column:1/-1}.title{align-items:start;flex-direction:column}.panel-foot{flex-wrap:wrap}.stage-wrap{padding:6px}}
+@media(max-width:760px){main{padding-inline:12px}.workspace{grid-template-columns:minmax(0,1fr)}.library{grid-template-columns:1fr 1fr}.library p{grid-column:1/-1}.title{align-items:start;flex-direction:column}.panel-foot{flex-wrap:wrap}.stage-wrap{padding:6px}
+.tiny-table th,.tiny-table td{white-space:normal;padding:6px 5px}.tiny-table td:first-child button{white-space:nowrap}}

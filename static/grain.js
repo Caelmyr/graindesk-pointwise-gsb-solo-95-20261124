@@ -4,7 +4,7 @@ const el = id => document.getElementById(id);
 const modes = [...document.querySelectorAll("[data-mode]")];
 const editControls = ["threshold", "minimum", "length", "holes", "apply", "settings", "box", "full", "calibrate", "saveReport"];
 const state = {plate: null, settings: null, result: null, report: null, mode: "grade", tool: "pick",
-               start: null, selected: null, url: null};
+               start: null, selected: null, url: null, trial: null, trialGrade: null};
 let busy = false;
 
 function status(message, error = false) {
@@ -91,6 +91,16 @@ function loadControls() {
     el("csvReport").href = "/grain" + reportPath("/grains.csv");
   }
   for (const id of editControls) el(id).disabled = Boolean(state.report);
+  el("runTrial").disabled = Boolean(state.report);
+}
+
+function trialEligibility(row) {
+  if (!row) return "先点选一粒颗粒。";
+  if (!state.result || state.result.mm_per_px === null) return "这张原片尚未标定，不能试方筛孔。";
+  if (row.edge) return "该粒被检查框截断，轮廓不完整。";
+  if (row.excluded) return "该粒已排除，不在筛级汇总内。";
+  if (row.grade === null) return "该粒尚未计入筛级汇总。";
+  return null;
 }
 
 function fieldNumber(id) {
@@ -105,8 +115,11 @@ function readControls() {
   const min_area = fieldNumber("minimum");
   const holes = el("holes").value.split(/[,，]/).map(value => value.trim() ? Number(value) : NaN);
   if (holes.some(value => !Number.isFinite(value) || value <= 0)) throw Error("请用逗号分隔有效孔径。");
+  const stale = threshold !== options.threshold || min_area !== options.min_area ||
+    holes.join() !== options.holes.join();
   return {...options, threshold, min_area, holes,
-          excluded: threshold !== options.threshold || min_area !== options.min_area ? [] : options.excluded};
+          excluded: stale ? [] : options.excluded,
+          trials: stale ? [] : (options.trials || [])};
 }
 
 function currentRow() {
@@ -118,11 +131,50 @@ function gradeLabel(row) {
   if (row.excluded) return "已排除";
   if (row.grade === null) return "待标定";
   const opening = state.result.grades[row.grade].hole;
-  return opening === null ? "超最大档" : "≤ " + opening + " mm";
+  const base = opening === null ? "超最大档" : "≤ " + opening + " mm";
+  return row.trial ? base + " · 方筛" : base;
 }
 
 function sizeLabel(value) {
   return value === null ? "—" : value.toFixed(2) + " mm";
+}
+
+const SIDE_NAMES = {left: "左", right: "右", top: "上", bottom: "下"};
+
+function sidesLabel(names) {
+  return names.map(name => SIDE_NAMES[name] || name).join(" / ");
+}
+
+function touchingSides(item) {
+  if (item.touching_edges?.length) return item.touching_edges;
+  const edges = item.edges_mm || {};
+  return Object.keys(SIDE_NAMES).filter(name => (edges[name] ?? 1) <= 0.005);
+}
+
+function appliedSummary(row) {
+  const trial = row?.trial;
+  if (trial) {
+    const sides = touchingSides(trial);
+    return "已采用：孔径 " + trial.hole + " mm · 转角 " + trial.angle + "° · 最近孔边余量 " +
+      trial.clearance_mm.toFixed(2) + " mm" + (sides.length ? " · 贴边（" + sidesLabel(sides) + "）" : "") +
+      (state.report ? "（留样核对）" : "");
+  }
+  if (!state.report) return "";
+  const adopted = state.result.grains.filter(grain => grain.trial);
+  const head = row ? "该粒在这份留样中按等面积圆径分档。" : "";
+  if (!adopted.length) return head + "这份留样没有采用方筛孔级。";
+  return head + "留样采用 " + adopted.length + " 粒方筛孔级：" + adopted.map(grain => {
+    const sides = touchingSides(grain.trial);
+    return grain.id + " · " + grain.trial.hole + " mm / " + grain.trial.angle + "° / 余 " +
+      grain.trial.clearance_mm.toFixed(2) + " mm" + (sides.length ? " 贴" + sidesLabel(sides) + "边" : "");
+  }).join("；");
+}
+
+function trialRowText(item) {
+  if (!item.fit) {
+    return "容不下 · 最小需 " + item.required_mm.toFixed(2) + " mm（" + item.required_angle + "°）";
+  }
+  return item.angle + "° · 贴边 " + (item.touching ? "是（" + sidesLabel(touchingSides(item)) + "）" : "否");
 }
 
 function renderData() {
@@ -135,6 +187,10 @@ function renderData() {
     " · " + gradeLabel(row) : "点图或列表可定位颗粒。";
   el("exclude").textContent = row?.excluded ? "恢复计入" : "排除该粒";
   el("exclude").disabled = !row || row.edge || Boolean(state.report);
+  el("runTrial").disabled = Boolean(state.report) || Boolean(trialEligibility(row));
+  el("trialHint").textContent = state.report ? "留样只读；下方列出已采用的方筛摆法。" :
+    (trialEligibility(row) || "点「按当前孔径试摆」查看各孔级的实际摆法。");
+  renderTrial(row);
   const summary = result.grades.map(grade => {
     const chip = document.createElement("div");
     chip.className = "grade-chip";
@@ -142,7 +198,7 @@ function renderData() {
     swatch.className = "swatch";
     swatch.style.background = grade.color;
     const count = document.createElement("b");
-    count.textContent = grade.count + " 粒";
+    count.textContent = grade.count + " 粒" + (grade.doubled ? " · 方筛 " + grade.doubled : "");
     chip.append(swatch, grade.hole === null ? "超最大档" : "≤ " + grade.hole + " mm", count);
     return chip;
   });
@@ -156,11 +212,133 @@ function renderData() {
     for (const value of [grain.area_px, sizeLabel(grain.equivalent_mm), gradeLabel(grain)]) {
       tr.insertCell().textContent = value;
     }
+    const trial = grain.trial;
+    tr.insertCell().textContent = trial ?
+      trial.hole + " mm · " + trial.angle + "° · 余 " + trial.clearance_mm.toFixed(2) : "—";
     tr.classList.toggle("active-row", grain.id === state.selected);
     return tr;
   });
   el("rows").replaceChildren(...body);
   paintOverlay();
+}
+
+function renderTrial(row) {
+  const trial = state.trial;
+  const box = el("trialResult");
+  el("appliedTrial").textContent = appliedSummary(row);
+  el("appliedActions").hidden = !row?.trial || Boolean(state.report);
+  if (!trial || trial.grain_id !== state.selected) {
+    box.hidden = true;
+    state.trialGrade = null;
+    return;
+  }
+  box.hidden = false;
+  const chosen = trial.openings.find(item => item.grade === state.trialGrade);
+  const pair = trial.tightest && trial.roomy ?
+    "；紧档 " + trial.tightest.hole + " mm 需转 " + trial.tightest.angle + "°，大档 " +
+    trial.roomy.hole + " mm 为 " + trial.roomy.angle + "°" : "";
+  el("trialReadout").textContent = "粒 " + trial.grain_id + " · 等效直径 " + trial.equivalent_mm.toFixed(2) +
+    " mm · 原向 0°" + pair + "；采用后只重分这一粒，其余照旧。";
+  el("trialRows").replaceChildren(...trial.openings.map(item => {
+    const tr = document.createElement("tr");
+    const button = document.createElement("button");
+    const tag = trial.roomy && trial.tightest?.grade === item.grade ? " · 紧" :
+      trial.roomy?.grade === item.grade ? " · 宽" : "";
+    button.textContent = item.grade + 1 + " 档" + tag;
+    button.onclick = () => { state.trialGrade = item.grade; renderTrial(row); };
+    tr.insertCell().append(button);
+    tr.insertCell().textContent = item.hole + " mm";
+    tr.insertCell().textContent = trialRowText(item);
+    tr.insertCell().textContent = item.fit ? item.clearance_mm.toFixed(3) + " mm" : "—";
+    tr.classList.toggle("active-row", item.grade === state.trialGrade);
+    return tr;
+  }));
+  el("adoptTrial").disabled = !chosen?.fit || Boolean(state.report);
+  el("adoptTrial").textContent = chosen?.fit ? "采用 " + chosen.hole + " mm · " + chosen.angle + "°" : "采用该孔级";
+  paintStages(trial);
+}
+
+function paintStages(trial) {
+  const host = el("trialStages");
+  const grades = [trial.tightest?.grade ?? null, trial.roomy?.grade ?? null];
+  const unique = [...new Set(grades.filter(grade => grade !== null))];
+  if (!unique.length) unique.push(state.trialGrade);
+  host.replaceChildren(...unique.map(grade => {
+    const wrap = document.createElement("div");
+    wrap.className = "trial-stage-wrap" + (grade === state.trialGrade ? " active" : "");
+    const canvas = document.createElement("canvas");
+    canvas.width = 240; canvas.height = 240;
+    canvas.style.width = canvas.style.height = "240px";
+    canvas.setAttribute("aria-label", "方筛孔摆法");
+    canvas.onclick = () => { state.trialGrade = grade; renderTrial(currentRow()); };
+    wrap.append(canvas);
+    const item = trial.openings.find(entry => entry.grade === grade);
+    const caption = document.createElement("small");
+    caption.textContent = item.fit ?
+      (grade === trial.tightest?.grade ? "紧档 " : "大档 ") + item.hole + " mm · " + item.angle + "° · 余 " +
+        item.clearance_mm.toFixed(2) + " mm" + (item.touching ? " · 贴边" : "") :
+      item.hole + " mm · 容不下";
+    wrap.append(caption);
+    paintStage(canvas, trial, item);
+    return wrap;
+  }));
+}
+
+function paintStage(canvas, trial, item) {
+  const size = 240;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = canvas.height = size * ratio;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+  const holes = trial.openings.map(entry => entry.hole);
+  const span = Math.max(...holes.map(hole => hole * 1.1));
+  const centre = size / 2, scaleTo = (size - 34) / span;
+  const drawHole = (hole, stroke, dash) => {
+    ctx.save();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(dash || []);
+    const side = hole * scaleTo;
+    ctx.strokeRect(centre - side / 2, centre - side / 2, side, side);
+    ctx.restore();
+  };
+  if (!item) return;
+  drawHole(item.hole, "#99e5ce");
+  // Faint reference across the opening at the photographed 0° orientation.
+  ctx.save();
+  ctx.strokeStyle = "#4f6b66";
+  ctx.setLineDash([2, 4]);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(centre - item.hole * scaleTo / 2, centre);
+  ctx.lineTo(centre + item.hole * scaleTo / 2, centre);
+  ctx.stroke();
+  ctx.restore();
+  const outline = item.outline.map(([x, y]) => [centre + x * scaleTo, centre + y * scaleTo]);
+  ctx.beginPath();
+  ctx.moveTo(...outline[0]);
+  for (const point of outline.slice(1)) ctx.lineTo(...point);
+  ctx.closePath();
+  ctx.fillStyle = item.fit ? "rgba(106,174,253,.28)" : "rgba(247,112,89,.25)";
+  ctx.strokeStyle = item.fit ? "#6aaefd" : "#f77059";
+  ctx.lineWidth = 2;
+  ctx.fill();
+  ctx.stroke();
+  if (item.fit && item.touching) {
+    const half = item.hole * scaleTo / 2;
+    const spots = {left: [centre - half, centre], right: [centre + half, centre],
+                   top: [centre, centre - half], bottom: [centre, centre + half]};
+    ctx.fillStyle = "#ffcf72";
+    for (const name of item.touching_edges) {
+      ctx.beginPath();
+      ctx.arc(...spots[name], 4, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+  ctx.fillStyle = "#f0f4ef";
+  ctx.font = "11px system-ui";
+  ctx.fillText(item.hole + " mm · " + (item.fit ? item.angle + "°" : "容不下"), 8, 16);
 }
 
 function drawBox(ctx, box, color, thickness) {
@@ -213,6 +391,8 @@ async function recalc(options) {
   state.settings = options;
   state.result = result;
   if (!currentRow()) state.selected = null;
+  state.trial = null;
+  state.trialGrade = null;
   await redraw();
   renderData();
 }
@@ -222,6 +402,8 @@ async function openPlate(id) {
   state.plate = await api("/plates/" + id);
   state.report = null;
   state.selected = null;
+  state.trial = null;
+  state.trialGrade = null;
   state.mode = "grade";
   state.settings = state.plate.settings;
   setTool("pick");
@@ -242,6 +424,8 @@ async function openReport(id) {
   state.settings = state.report.settings;
   state.result = state.report.results;
   state.selected = null;
+  state.trial = null;
+  state.trialGrade = null;
   state.mode = "grade";
   setTool("pick");
   loadControls();
@@ -252,6 +436,8 @@ async function openReport(id) {
 
 function selectGrain(id) {
   state.selected = id;
+  state.trial = null;
+  state.trialGrade = null;
   renderData();
 }
 
@@ -338,10 +524,54 @@ el("exclude").onclick = handle(async () => {
   await recalc({...state.settings, excluded});
   status(row.excluded ? "已恢复计入该粒。" : "该粒已从筛级汇总排除。");
 });
+el("runTrial").onclick = handle(async () => {
+  const row = currentRow();
+  const reason = trialEligibility(row);
+  if (reason) throw Error(reason);
+  state.trial = await api(platePath("/trial"), "POST",
+                          {settings: state.settings, grain_id: row.id});
+  state.trialGrade = state.trial.tightest?.grade ?? null;
+  renderData();
+  status(state.trial.fitting.length ? "已试摆当前孔径，选择要采用的孔级。" : "现有孔径都容不下该粒。");
+});
+el("adoptTrial").onclick = handle(async () => {
+  const row = currentRow();
+  const item = state.trial?.openings.find(entry => entry.grade === state.trialGrade && entry.fit);
+  if (!row || !item) throw Error("请先选择一个可容下的摆法。");
+  const answer = await api(platePath("/trial/apply"), "POST", {
+    revision: state.plate.revision, settings: state.settings,
+    trial: {grain_id: row.id, grade: item.grade}});
+  state.plate = answer.plate;
+  state.settings = answer.plate.settings;
+  state.result = answer.result;
+  state.selected = row.id;
+  state.trial = null;
+  state.trialGrade = null;
+  await redraw();
+  renderData();
+  const applied = answer.trial;
+  status("已按 " + applied.hole + " mm 孔级（" + applied.angle + "°）重分这一粒，其余颗粒照旧。");
+});
 for (const button of modes) button.onclick = handle(async () => {
   state.mode = button.dataset.mode;
   await redraw();
 });
+el("clearTrial").onclick = handle(async () => {
+  const row = currentRow();
+  if (!row?.trial) throw Error("该粒没有采用方筛孔级。");
+  const answer = await api(platePath("/trial/clear"), "POST", {
+    revision: state.plate.revision, settings: state.settings, grain_id: row.id});
+  state.plate = answer.plate;
+  state.settings = answer.plate.settings;
+  state.result = answer.result;
+  state.selected = row.id;
+  state.trial = null;
+  state.trialGrade = null;
+  await redraw();
+  renderData();
+  status("该粒已恢复按等面积圆径分档，其余颗粒照旧。");
+});
+
 el("saveReport").onclick = () => {
   el("reportTitle").value = state.plate.title + " · 留样";
   el("reportDialog").showModal();

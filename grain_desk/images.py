@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
 from image_lab.validation import Invalid
 
+from . import trials
+
 MAX_UPLOAD = 12 * 1024 * 1024
 MAX_PIXELS = 3_200_000
 MAX_GRAINS = 600
@@ -104,7 +106,13 @@ class Analysis:
         return match["id"] if match else None
 
     def report(self):
-        visible = [{k: value for k, value in row.items() if k != "label"} for row in self.grains]
+        visible = []
+        for row in self.grains:
+            item = {key: value for key, value in row.items()
+                    if key not in ("label", "equivalent_grade", "applied")}
+            if row["applied"] is not None:
+                item["trial"] = row["applied"]
+            visible.append(item)
         counted = [row for row in visible if row["grade"] is not None]
         return {"box": self.box, "mm_per_px": self.mm_per_px, "foreground_px": self.foreground,
                 "total": len(visible), "counted": len(counted), "grains": visible, "grades": self.grades}
@@ -135,6 +143,7 @@ def component_rows(labels, stats, centroids, box, options, factor):
     np.minimum.at(first, labels.ravel()[positions], positions)
     minimum = options["min_area"]
     excluded = set(options["excluded"])
+    trials_by_id = {row["grain_id"]: row for row in options.get("trials", [])}
     rows = []
     for label in np.flatnonzero(stats[:, cv2.CC_STAT_AREA] >= minimum):
         if label == 0:
@@ -146,23 +155,79 @@ def component_rows(labels, stats, centroids, box, options, factor):
         edge = x == 0 or y == 0 or x + w == width or y + h == bottom - top
         omitted = grain_id in excluded
         grade = None if omitted or edge else size_grade(size, options["holes"])
+        applied = None
+        if factor is not None and not omitted and not edge:
+            applied = trials_by_id.get(grain_id)
+            if applied is not None and not 0 <= applied["grade"] < len(options["holes"]):
+                applied = None
+            if applied is not None and abs(options["holes"][applied["grade"]] - applied["hole"]) > trials.MM_TOLERANCE:
+                applied = None
+        if applied is not None:
+            grade = applied["grade"]
         rows.append({"id": grain_id, "label": int(label), "area_px": area,
                      "center": [round(float(centroids[label][0]) + left, 2),
                                 round(float(centroids[label][1]) + top, 2)],
                      "bounds": [x + left, y + top, x + w + left, y + h + top],
-                     "edge": edge, "excluded": omitted, "equivalent_mm": size, "grade": grade})
+                     "edge": edge, "excluded": omitted, "equivalent_mm": size, "grade": grade,
+                     "equivalent_grade": None if omitted or edge else size_grade(size, options["holes"]),
+                     "applied": applied})
     return sorted(rows, key=lambda row: (-row["area_px"], row["center"][1], row["center"][0]))
 
 
 def group_grades(rows, holes):
-    grades = [{"id": n, "hole": opening, "count": 0, "area_px": 0,
+    grades = [{"id": n, "hole": opening, "count": 0, "area_px": 0, "doubled": 0,
                "color": "#%02x%02x%02x" % COLORS[n]} for n, opening in enumerate([*holes, None])]
     for row in rows:
         if row["grade"] is not None:
             target = grades[row["grade"]]
             target["count"] += 1
             target["area_px"] += row["area_px"]
+            target["doubled"] += row["applied"] is not None
     return grades
+
+
+def trial_grain(result, grain_id, holes):
+    """Square-hole trials for one calibrated, intact, counted grain."""
+    row, points = grain_outline(result, grain_id)
+    proposals = trials.placements(points, result.mm_per_px, holes)
+    fitting = [item for item in proposals if item["fit"]]
+    tightest = fitting[0] if fitting else None
+    roomy = next((item for item in fitting if item["grade"] > tightest["grade"]), None) if tightest else None
+    return {"grain_id": grain_id, "box": result.box, "mm_per_px": result.mm_per_px,
+            "equivalent_mm": round(row["equivalent_mm"], 4), "equivalent_grade": row["equivalent_grade"],
+            "current_grade": row["grade"], "openings": proposals,
+            "fitting": [item["grade"] for item in fitting],
+            "tightest": tightest, "roomy": roomy,
+            "center": row["center"], "bounds": row["bounds"],
+            "applied": row["applied"]}
+
+
+def grain_outline(result, grain_id):
+    row = next((item for item in result.grains if item["id"] == grain_id), None)
+    if row is None:
+        raise Invalid("找不到这颗颗粒，请重新点选。")
+    if result.mm_per_px is None:
+        raise Invalid("这张原片尚未标定，不能试方筛孔。")
+    reason = trials.eligible(row, result.mm_per_px)
+    if reason:
+        raise Invalid(reason)
+    points = trials.outline(result.labels, result.box, row)
+    if points is None or len(points) < 3:
+        raise Invalid("读不到这颗颗粒的完整轮廓。")
+    return row, points
+
+
+def retry(image, options, entry, result=None, row=None):
+    """Fresh closest placement of an adopted grain in its opening, or None if gone."""
+    result = result if result is not None else analyze(image, options)
+    row = row or next((item for item in result.grains if item["id"] == entry["grain_id"]), None)
+    if row is None or row["edge"] or row["excluded"] or row["equivalent_mm"] is None:
+        return None
+    points = trials.outline(result.labels, result.box, row)
+    if points is None or len(points) < 3:
+        return None
+    fresh = trials.candidate(points, result.mm_per_px, entry["hole"])
+    return fresh if fresh["fit"] else None
 
 
 def analyze(image, options):

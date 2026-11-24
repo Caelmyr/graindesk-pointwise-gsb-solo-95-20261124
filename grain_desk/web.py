@@ -96,6 +96,29 @@ def create_app(root):
             summary["selected"] = result.grain_at(point)
         return jsonify(summary)
 
+    @desk.post("/plates/<plate>/trial")
+    def trial(plate):
+        record = library.plate(plate)
+        payload = body()
+        options = state.settings(record, payload.get("settings", {}))
+        grain_id = payload.get("grain_id")
+        if not isinstance(grain_id, str) or not grain_id:
+            raise Invalid("请先点选一粒颗粒。")
+        result = images.analyze(library.image(plate), options)
+        return jsonify(images.trial_grain(result, grain_id, options["holes"]))
+
+    @desk.post("/plates/<plate>/trial/apply")
+    def apply_trial(plate):
+        payload = body()
+        return jsonify(library.adopt_trial(plate, payload.get("revision"),
+                                           payload.get("settings"), payload.get("trial")))
+
+    @desk.post("/plates/<plate>/trial/clear")
+    def clear_trial(plate):
+        payload = body()
+        return jsonify(library.clear_trial(plate, payload.get("revision"),
+                                           payload.get("settings"), payload.get("grain_id")))
+
     @desk.post("/plates/<plate>/view/<mode>")
     def view(plate, mode):
         if mode not in images.VIEWS:
@@ -130,9 +153,11 @@ def create_app(root):
     @desk.get("/plates/<plate>/reports/<report>/grains.csv")
     def grains_csv(plate, report):
         record = library.report(plate, report)
+        applied = library.applied_trials(plate, record)
         output = StringIO(newline="")
         writer = csv.writer(output)
-        writer.writerow(["grain_id", "x_px", "y_px", "area_px", "equivalent_mm", "class_upper_mm", "status"])
+        writer.writerow(["grain_id", "x_px", "y_px", "area_px", "equivalent_mm", "class_upper_mm",
+                         "status", "trial_angle_deg", "trial_clearance_mm", "trial_touching"])
         for row in record["results"]["grains"]:
             index = row["grade"]
             hole = record["results"]["grades"][index]["hole"] if index is not None else None
@@ -140,8 +165,13 @@ def create_app(root):
             if index is not None and hole is None:
                 hole = "oversize"
             size = row["equivalent_mm"]
-            writer.writerow([row["id"], *row["center"], row["area_px"], f"{size:.6f}" if size is not None else "",
-                             hole if hole is not None else "", status])
+            trial = applied.get(row["id"])
+            writer.writerow([row["id"], *row["center"], row["area_px"],
+                             f"{size:.6f}" if size is not None else "",
+                             hole if hole is not None else "", status,
+                             trial["angle"] if trial else "",
+                             f"{trial['clearance_mm']:.4f}" if trial else "",
+                             "yes" if trial and trial["touching"] else "no" if trial else ""])
         return send_file(BytesIO(output.getvalue().encode("utf-8-sig")), mimetype="text/csv",
                          download_name="grain-grades.csv", as_attachment=True, max_age=0)
 
