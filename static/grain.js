@@ -4,8 +4,33 @@ const el = id => document.getElementById(id);
 const modes = [...document.querySelectorAll("[data-mode]")];
 const editControls = ["threshold", "minimum", "length", "holes", "apply", "settings", "box", "full", "calibrate", "saveReport"];
 const state = {plate: null, settings: null, result: null, report: null, mode: "grade", tool: "pick",
-               start: null, selected: null, url: null};
+               start: null, selected: null, url: null, review: null};
 let busy = false;
+
+function fmtAngle(value) {
+  return value.toFixed(1) + "°";
+}
+
+function arcSpan(arc) {
+  const end = arc.start_deg + arc.width_deg;
+  return end <= 180 ? fmtAngle(arc.start_deg) + " – " + fmtAngle(end)
+    : fmtAngle(arc.start_deg) + " – " + fmtAngle(end - 180) + "（跨过 0°）";
+}
+
+function reviewMembers() {
+  if (!state.review) return null;
+  const excluded = new Set(state.settings.excluded);
+  return state.review.members.filter(id => !excluded.has(id));
+}
+
+function inReview(id) {
+  return Boolean(state.review) && reviewMembers().includes(id);
+}
+
+function exitReview() {
+  state.review = null;
+  if (state.result) renderData();
+}
 
 function status(message, error = false) {
   el("status").textContent = message;
@@ -128,13 +153,19 @@ function sizeLabel(value) {
 function renderData() {
   const result = state.result;
   const row = currentRow();
-  el("counts").textContent = "计入 " + result.counted + " / " + result.total + " 粒";
+  const members = reviewMembers();
+  const scopedRows = members ? result.grains.filter(grain => members.includes(grain.id)) : result.grains;
+  const scopedCounted = scopedRows.filter(grain => grain.grade !== null).length;
+  el("counts").textContent = members ?
+    "复核 " + scopedCounted + " / " + scopedRows.length + " 粒（全框 " + result.counted + " / " + result.total + "）"
+    : "计入 " + result.counted + " / " + result.total + " 粒";
   el("calibration").textContent = result.mm_per_px === null ?
     "未标定。仍可检查像素面积与轮廓。" : result.mm_per_px.toPrecision(4) + " mm / px";
   el("probe").textContent = row ? "粒 " + row.id + " · " + row.area_px + " px² · " + sizeLabel(row.equivalent_mm) +
     " · " + gradeLabel(row) : "点图或列表可定位颗粒。";
   el("exclude").textContent = row?.excluded ? "恢复计入" : "排除该粒";
-  el("exclude").disabled = !row || row.edge || Boolean(state.report);
+  el("exclude").disabled = !row || row.edge || Boolean(state.report) ||
+    (Boolean(state.review) && !inReview(row.id));
   const summary = result.grades.map(grade => {
     const chip = document.createElement("div");
     chip.className = "grade-chip";
@@ -147,7 +178,8 @@ function renderData() {
     return chip;
   });
   el("summary").replaceChildren(...summary);
-  const body = result.grains.map(grain => {
+  const visibleGrains = members ? result.grains.filter(grain => members.includes(grain.id)) : result.grains;
+  const body = visibleGrains.map(grain => {
     const tr = document.createElement("tr");
     const label = document.createElement("button");
     label.textContent = grain.id;
@@ -160,6 +192,7 @@ function renderData() {
     return tr;
   });
   el("rows").replaceChildren(...body);
+  renderOrientation();
   paintOverlay();
 }
 
@@ -168,6 +201,91 @@ function drawBox(ctx, box, color, thickness) {
   ctx.strokeStyle = color;
   ctx.lineWidth = thickness;
   ctx.strokeRect(x0 + .5, y0 + .5, x1 - x0 - 1, y1 - y0 - 1);
+}
+
+function renderOrientation() {
+  const host = el("orientationBody");
+  if (!state.result) {
+    host.replaceChildren();
+    return;
+  }
+  const info = state.result.orientation;
+  host.replaceChildren();
+  if (state.review) {
+    const banner = document.createElement("div");
+    banner.className = "review-banner";
+    const text = document.createElement("span");
+    const liveArea = state.result.grains
+      .filter(grain => reviewMembers().includes(grain.id))
+      .reduce((total, grain) => total + grain.area_px, 0);
+    text.textContent = "复核范围：" + state.review.title + " " + arcSpan(state.review) +
+      " · " + reviewMembers().length + " 粒 · " + liveArea + " px²";
+    const leave = document.createElement("button");
+    leave.textContent = "结束复核";
+    leave.onclick = handle(async () => {
+      exitReview();
+      status("已回到全框，筛级未改变。");
+    });
+    banner.append(text, leave);
+    host.append(banner);
+    if (reviewMembers().length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = "该角段的成员均已被排除；恢复计入或结束复核即可。";
+      host.append(empty);
+    }
+  }
+  const head = document.createElement("p");
+  head.className = "hint";
+  head.textContent = "有方向 " + info.oriented_total + " 粒；长轴两端同向，角度按 0–180° 统计。";
+  host.append(head);
+  const cards = [["count_arc", "按粒数最窄角段"], ["area_arc", "按投影面积最窄角段"]]
+    .map(([key, title]) => buildArcCard(key, title, info));
+  if (cards.length) host.append(...cards);
+  const round = document.createElement("p");
+  round.className = "round";
+  if (info.round_total) {
+    round.innerHTML = "方向不清（近圆，长短轴比 ≥ " + info.round_axis_ratio + "）：<b>" +
+      info.round_total + " 粒</b>，不进入角段统计。";
+  } else {
+    round.textContent = "没有近圆颗粒，全部长颗粒均参与方向统计。";
+  }
+  host.append(round);
+}
+
+function buildArcCard(key, title, info) {
+  const arc = info[key];
+  const card = document.createElement("div");
+  card.className = "arc";
+  if (!arc) {
+    card.append(Object.assign(document.createElement("p"), {className: "arc-meta",
+      textContent: "有方向的颗粒不足，无法计算角段。"}));
+    return card;
+  }
+  const adopted = state.review?.kind === key;
+  card.classList.toggle("adopted", adopted);
+  const name = document.createElement("div");
+  name.className = "arc-name";
+  name.append(document.createTextNode(title), document.createTextNode(arcSpan(arc)));
+  const meta = document.createElement("div");
+  meta.className = "arc-meta";
+  meta.textContent = "角段宽 " + fmtAngle(arc.width_deg) + " · 实际罩住 " + arc.grain_count +
+    " 粒 · 投影面积 " + arc.area_px + " px²";
+  card.append(name, meta);
+  if (!state.report) {
+    const button = document.createElement("button");
+    button.textContent = adopted ? "已采用为本次复核范围" : "采用此角段复核";
+    button.disabled = Boolean(state.review);
+    button.onclick = handle(async () => {
+      state.review = {kind: key, title, start_deg: arc.start_deg, width_deg: arc.width_deg,
+                      grain_count: arc.grain_count, area_px: arc.area_px, members: [...arc.members]};
+      if (!inReview(state.selected)) state.selected = null;
+      renderData();
+      status("已按「" + title + "」限定复核范围，原片仍显示整框。");
+    });
+    card.append(button);
+  }
+  return card;
 }
 
 function paintOverlay() {
@@ -212,7 +330,13 @@ async function recalc(options) {
   const result = await api(platePath("/inspect"), "POST", {settings: options});
   state.settings = options;
   state.result = result;
-  if (!currentRow()) state.selected = null;
+  if (state.review) {
+    const present = new Set(result.grains.map(grain => grain.id));
+    state.review.members = state.review.members.filter(id => present.has(id));
+    if (!inReview(state.selected)) state.selected = null;
+  } else if (!currentRow()) {
+    state.selected = null;
+  }
   await redraw();
   renderData();
 }
@@ -222,6 +346,7 @@ async function openPlate(id) {
   state.plate = await api("/plates/" + id);
   state.report = null;
   state.selected = null;
+  state.review = null;
   state.mode = "grade";
   state.settings = state.plate.settings;
   setTool("pick");
@@ -242,6 +367,7 @@ async function openReport(id) {
   state.settings = state.report.settings;
   state.result = state.report.results;
   state.selected = null;
+  state.review = null;
   state.mode = "grade";
   setTool("pick");
   loadControls();
@@ -251,6 +377,10 @@ async function openReport(id) {
 }
 
 function selectGrain(id) {
+  if (state.review && !inReview(id)) {
+    status("该粒不在当前复核角段内，先结束复核再选它。");
+    return;
+  }
   state.selected = id;
   renderData();
 }
@@ -266,6 +396,10 @@ el("overlay").onclick = handle(async event => {
   const point = canvasPoint(event);
   if (state.tool === "pick") {
     const result = await api(platePath("/inspect"), "POST", {settings: state.settings, point});
+    if (result.selected && state.review && !inReview(result.selected)) {
+      status("该粒不在当前复核角段内；点粒与列表仅复核该组粒号。");
+      return;
+    }
     selectGrain(result.selected);
     status(result.selected ? "已定位颗粒。" : "该位置无可复核颗粒。");
     return;
@@ -278,11 +412,13 @@ el("overlay").onclick = handle(async event => {
     return;
   }
   if (state.tool === "box") {
+    exitReview();
     const box = [Math.min(first[0], point[0]), Math.min(first[1], point[1]),
                  Math.max(first[0], point[0]) + 1, Math.max(first[1], point[1]) + 1];
     await recalc({...readControls(), box, excluded: []});
     status("已重算检查框。");
   } else {
+    exitReview();
     await recalc({...readControls(), calibration: {points: [first, point], mm: fieldNumber("length")}});
     status("标尺已就位。");
   }
@@ -317,15 +453,18 @@ el("calibrate").onclick = handle(async () => {
   setTool("calibrate");
 });
 el("full").onclick = handle(async () => {
+  exitReview();
   await recalc({...readControls(), box: [0, 0, state.plate.width, state.plate.height], excluded: []});
   setTool("pick");
   status("已显示整张原片。");
 });
 el("apply").onclick = handle(async () => {
+  exitReview();
   await recalc(readControls());
   status("检查结果已重算。");
 });
 el("settings").onclick = handle(async () => {
+  exitReview();
   const plate = await api(platePath("/settings"), "PUT", {revision: state.plate.revision, settings: readControls()});
   state.plate = plate;
   await recalc(plate.settings);
@@ -336,7 +475,7 @@ el("exclude").onclick = handle(async () => {
   const excluded = state.settings.excluded.filter(id => id !== row.id);
   if (!row.excluded) excluded.push(row.id);
   await recalc({...state.settings, excluded});
-  status(row.excluded ? "已恢复计入该粒。" : "该粒已从筛级汇总排除。");
+  status(row.excluded ? "已恢复计入该粒。" : "该粒已从复核组与筛级汇总中排除，角段保持不变。");
 });
 for (const button of modes) button.onclick = handle(async () => {
   state.mode = button.dataset.mode;

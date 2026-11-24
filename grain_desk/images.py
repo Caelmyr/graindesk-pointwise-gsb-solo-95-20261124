@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
 from image_lab.validation import Invalid
 
+from . import orientation
+
 MAX_UPLOAD = 12 * 1024 * 1024
 MAX_PIXELS = 3_200_000
 MAX_GRAINS = 600
@@ -93,6 +95,7 @@ class Analysis:
     grades: list
     foreground: int
     mm_per_px: float | None
+    directions: dict
 
     def grain_at(self, point):
         x, y = point
@@ -107,7 +110,8 @@ class Analysis:
         visible = [{k: value for k, value in row.items() if k != "label"} for row in self.grains]
         counted = [row for row in visible if row["grade"] is not None]
         return {"box": self.box, "mm_per_px": self.mm_per_px, "foreground_px": self.foreground,
-                "total": len(visible), "counted": len(counted), "grains": visible, "grades": self.grades}
+                "total": len(visible), "counted": len(counted), "grains": visible,
+                "grades": self.grades, "orientation": self.directions}
 
 
 def scale(calibration):
@@ -174,7 +178,9 @@ def analyze(image, options):
         raise Invalid("检查框中的颗粒过多，请缩小框或提高最小面积。")
     factor = scale(options["calibration"])
     rows = component_rows(labels, stats, centroids, box, options, factor)
-    return Analysis(box, labels, rows, group_grades(rows, options["holes"]), int(foreground.sum()), factor)
+    directions = orientation.orientation_report(rows, labels, box)
+    return Analysis(box, labels, rows, group_grades(rows, options["holes"]),
+                    int(foreground.sum()), factor, directions)
 
 
 def render(image, result, mode):
